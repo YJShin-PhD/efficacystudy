@@ -62,9 +62,19 @@ with tabs[0]:
         # --- 사이드바 설정 ---
         st.sidebar.header("📊 분석 설정")
         cols = df.columns.tolist()
+        
+        # [개선] 데이터 열 초기값 스마트 선택 (No. 제외)
         g_col = st.sidebar.selectbox("그룹 열", cols, index=cols.index('Group') if 'Group' in cols else 0)
         d_col = st.sidebar.selectbox("날짜 열", cols, index=cols.index('Day') if 'Day' in cols else 0)
-        w_col = st.sidebar.selectbox("데이터 열", [c for c in cols if c not in [g_col, d_col]], index=0)
+        
+        # 분석 대상 후보: 숫자형이면서 No, Day가 아닌 열 우선 탐색
+        candidate_cols = [c for c in cols if c not in [g_col, d_col, 'No.', 'no', 'No']]
+        default_w_idx = 0
+        for i, c in enumerate(candidate_cols):
+            if any(kw in c.lower() for kw in ['weight', 'value', 'data', 'result']):
+                default_w_idx = i
+                break
+        w_col = st.sidebar.selectbox("데이터 열", candidate_cols, index=default_w_idx)
 
         all_days = sorted(df[d_col].unique())
         day_range = st.sidebar.slider("표시 기간(Day)", int(min(all_days)), int(max(all_days)), (int(min(all_days)), int(max(all_days))))
@@ -73,7 +83,7 @@ with tabs[0]:
         target_sel = st.sidebar.selectbox("통계 기준일", stat_options, index=len(stat_options)-1)
         ctrl_g = st.sidebar.selectbox("대조군(Control)", sorted(df[g_col].unique()), index=0)
 
-        # --- 트렌드 그래프 ---
+        # --- 트렌드 그래프 (x축 실제 측정일 반영) ---
         color_map = {"G1": "#000000", "G2": "#1f77b4", "G3": "#ff7f0e", "G4": "#d62728", "G5": "#2ca02c"}
         graph_df = df[(df[d_col] >= day_range[0]) & (df[d_col] <= day_range[1])].dropna(subset=[w_col])
         df_s = graph_df.groupby([g_col, d_col])[w_col].agg(['mean', 'sem']).reset_index()
@@ -81,10 +91,21 @@ with tabs[0]:
         fig = go.Figure()
         for g in sorted(df[g_col].unique()):
             data = df_s[df_s[g_col] == g]
-            fig.add_trace(go.Scatter(x=data[d_col], y=data['mean'], name=g, mode='lines+markers',
-                                    line=dict(color=color_map.get(g, None), width=3),
-                                    error_y=dict(type='data', array=data['sem'], visible=True)))
-        fig.update_layout(xaxis_title="Day", yaxis_title=w_col, plot_bgcolor='white')
+            fig.add_trace(go.Scatter(
+                x=data[d_col], # 실제 날짜 값 사용
+                y=data['mean'], 
+                name=g, 
+                mode='lines+markers',
+                line=dict(color=color_map.get(g, None), width=3),
+                error_y=dict(type='data', array=data['sem'], visible=True)
+            ))
+        
+        # [개선] x축을 카테고리가 아닌 선형/실제 숫자축으로 설정
+        fig.update_layout(
+            xaxis=dict(title="Day (Actual Measured Days)", tickmode='linear', dtick=None),
+            yaxis_title=w_col, 
+            plot_bgcolor='white'
+        )
         st.plotly_chart(fig, use_container_width=True)
 
         # --- 통계 분석 ---
@@ -122,16 +143,14 @@ with tabs[0]:
 
         if c3.button("🚀 Scheffé"):
             try:
-                # [개선] 정보량을 늘린 Scheffe 로직
                 groups = sorted(a_df[g_col].unique()); results = []
                 comb = list(itertools.combinations(groups, 2))
                 for g1, g2 in comb:
                     d1, d2 = a_df[a_df[g_col] == g1][w_col], a_df[a_df[g_col] == g2][w_col]
                     diff = np.mean(d1) - np.mean(d2)
                     _, p_val = stats.ttest_ind(d1, d2)
-                    adj_p = min(p_val * len(comb), 1.0) # Bonferroni-Scheffe correction
+                    adj_p = min(p_val * len(comb), 1.0)
                     results.append({"Group A": g1, "Group B": g2, "Mean Diff": round(diff, 2), "p-adj": adj_p, "Signif": "*" if adj_p < 0.05 else "ns"})
-                
                 res_df = pd.DataFrame(results)
                 st.session_state.stat_results['Scheffe'] = res_df
                 sig_list = res_df[res_df['Signif'] == "*"]
@@ -139,7 +158,6 @@ with tabs[0]:
                 st.rerun()
             except Exception as e: st.error(f"Scheffé 오류: {e}")
 
-        # 상세 결과 표시 (박사님 확인용)
         for method, data in st.session_state.stat_results.items():
             st.write(f"**[{method} 상세 결과]**")
             st.dataframe(data, use_container_width=True)
@@ -148,7 +166,7 @@ with tabs[0]:
             st.sidebar.divider()
             st.sidebar.download_button("📥 통합 리포트 다운로드", data=to_excel_final(summary, st.session_state.stat_results), file_name=f"Analysis_Report.xlsx")
 
-# 4. 관리자 탭 (기능 유지)
+# 4. 관리자 탭
 if user_info["role"] == "admin":
     with tabs[1]:
         st.header("⚙️ 데이터 관리")

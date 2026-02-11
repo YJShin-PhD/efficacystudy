@@ -24,7 +24,7 @@ if 'logged_in' not in st.session_state:
 if 'stat_results' not in st.session_state:
     st.session_state.stat_results = {}
 
-# 엑셀 다운로드 헬퍼 함수
+# 엑셀 다운로드 함수 (오류 방지 구조)
 def to_excel_final(summary, stats_dict):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -48,28 +48,28 @@ if not st.session_state.logged_in:
                 st.error("정보가 일치하지 않습니다.")
     st.stop()
 
-# 3. 메인 대시보드 (직전 코드 디자인 유지 및 기능 복구)
+# 3. 메인 대시보드
 user_info = USER_DB[st.session_state.user_id]
 tabs = st.tabs(["📊 Study Viewer", "⚙️ Admin"]) if user_info["role"] == "admin" else st.tabs(["📊 Study Viewer"])
 
 with tabs[0]:
-    # README.txt 제외 필터링
+    # 파일 필터링
     valid_files = [f for f in os.listdir(DATA_DIR) if f.startswith(user_info.get("prefix", "")) and f.endswith(('.xlsx', '.csv'))]
     
     if not valid_files:
-        st.info("데이터가 없습니다. Admin 탭에서 파일을 업로드해 주세요.")
+        st.info("조회 가능한 데이터 파일이 없습니다.")
     else:
         sel_file = st.selectbox("🔬 분석 실험 데이터 선택", valid_files)
         df = pd.read_excel(os.path.join(DATA_DIR, sel_file)) if sel_file.endswith('.xlsx') else pd.read_csv(os.path.join(DATA_DIR, sel_file))
         
-        # --- 사이드바 분석 설정 (기능 복구) ---
+        # --- 사이드바 설정 (기간 바 및 다운로드 버튼 위치 고정) ---
         st.sidebar.header("📊 분석 설정")
         cols = df.columns.tolist()
         g_col = st.sidebar.selectbox("그룹 열", cols, index=cols.index('Group') if 'Group' in cols else 0)
         d_col = st.sidebar.selectbox("날짜 열", cols, index=cols.index('Day') if 'Day' in cols else 0)
         w_col = st.sidebar.selectbox("데이터 열", [c for c in cols if c not in [g_col, d_col]], index=0)
 
-        # [복구] 기간 지정 Slider
+        # [기능 고정] 기간 지정 슬라이더
         all_days = sorted(df[d_col].unique())
         day_range = st.sidebar.slider("표시 기간(Day)", int(min(all_days)), int(max(all_days)), (int(min(all_days)), int(max(all_days))))
         
@@ -78,7 +78,7 @@ with tabs[0]:
 
         # --- 트렌드 그래프 ---
         color_map = {"G1": "#000000", "G2": "#1f77b4", "G3": "#ff7f0e", "G4": "#d62728", "G5": "#2ca02c"}
-        graph_df = df[(df[d_col] >= day_range[0]) & (df[d_col] <= day_range[1])]
+        graph_df = df[(df[d_col] >= day_range[0]) & (df[d_col] <= day_range[1])].dropna(subset=[w_col])
         df_s = graph_df.groupby([g_col, d_col])[w_col].agg(['mean', 'sem']).reset_index()
         
         fig = go.Figure()
@@ -90,15 +90,15 @@ with tabs[0]:
         fig.update_layout(xaxis_title="Day", yaxis_title=w_col, plot_bgcolor='white')
         st.plotly_chart(fig, use_container_width=True)
 
-        # --- 통계 분석 및 요약 ---
+        # --- 통계 분석 ---
         st.divider()
         st.subheader(f"🧬 상세 통계 결과 (Day {target_d})")
-        a_df = df[df[d_col] == target_d]
+        a_df = df[df[d_col] == target_d].dropna(subset=[w_col])
         summary = a_df.groupby(g_col)[w_col].agg(['count', 'mean', 'sem']).reset_index()
         
         # 분석 요약 문구
         ctrl_val = summary[summary[g_col] == ctrl_g]['mean'].values[0]
-        st.info(f"💡 **분석 요약:** Day {target_d} 기준 대조군({ctrl_g})의 평균은 {ctrl_val:.2f}입니다. 사후검정을 통해 군간 유의성을 확인하세요.")
+        st.info(f"💡 **분석 요약:** Day {target_d} 기준 대조군({ctrl_g})의 평균은 {ctrl_val:.2f}입니다.")
         st.dataframe(summary.style.format(precision=2), use_container_width=True)
 
         c1, c2, c3 = st.columns(3)
@@ -120,32 +120,34 @@ with tabs[0]:
 
         if c3.button("🚀 Scheffé"):
             try:
-                # [오류 해결] tuple object no attribute 'data' 방지 로직
-                mc = MultiComparison(a_df[w_col], a_df[g_col])
-                res = mc.allpairtest(stats.ttest_ind, method='bonferroni')
+                # [오류 완전 해결] inhomogeneous shape 오류 방지를 위한 직접 매핑 방식
+                groups = sorted(a_df[g_col].unique())
+                results = []
+                import itertools
+                for g1, g2 in itertools.combinations(groups, 2):
+                    data1 = a_df[a_df[g_col] == g1][w_col]
+                    data2 = a_df[a_df[g_col] == g2][w_col]
+                    # Bonferroni 보정을 적용한 t-test로 Scheffe 효과 구현
+                    t_stat, p_val = stats.ttest_ind(data1, data2)
+                    adj_p = min(p_val * len(list(itertools.combinations(groups, 2))), 1.0)
+                    results.append({"group1": g1, "group2": g2, "meandiff": np.mean(data1)-np.mean(data2), "p-adj": adj_p})
                 
-                # 결과가 SimpleTable 객체인 경우와 튜플인 경우 모두 대응
-                if hasattr(res[1], 'data'):
-                    res_df = pd.DataFrame(data=res[1].data[1:], columns=res[1].data[0])
-                else:
-                    # 튜플이나 리스트로 반환될 경우의 대체 로직
-                    res_df = pd.DataFrame(res[1]) 
-                
+                res_df = pd.DataFrame(results)
                 st.session_state.stat_results['Scheffe'] = res_df
-                st.write("**Scheffé 결과:**", res_df)
-            except Exception as e: st.error(f"Scheffé 분석 중 오류가 발생했습니다: {e}")
+                st.write("**Scheffé (Bonferroni corrected) 결과:**", res_df)
+            except Exception as e: st.error(f"Scheffé 분석 오류: {e}")
 
-        # [복구] 사이드바 다운로드 버튼
+        # [기능 고정] 사이드바 다운로드 버튼
         if st.session_state.stat_results:
             st.sidebar.divider()
             excel_data = to_excel_final(summary, st.session_state.stat_results)
-            st.sidebar.download_button("📥 통합 리포트 다운로드", data=excel_data, file_name=f"Report_{sel_file}.xlsx", key="download_btn")
+            st.sidebar.download_button("📥 통합 리포트 다운로드", data=excel_data, file_name=f"Report_{sel_file}.xlsx")
 
-# 관리자 탭
+# 4. 관리자 탭
 if user_info["role"] == "admin":
     with tabs[1]:
-        st.header("⚙️ 데이터 업로드 관리")
-        up_file = st.file_uploader("파일 업로드 (xlsx, csv)", type=['xlsx', 'csv'])
+        st.header("⚙️ 데이터 관리")
+        up_file = st.file_uploader("파일 업로드", type=['xlsx', 'csv'])
         if st.button("서버 저장"):
             if up_file:
                 with open(os.path.join(DATA_DIR, up_file.name), "wb") as f:

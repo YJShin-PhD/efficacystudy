@@ -63,11 +63,10 @@ with tabs[0]:
         st.sidebar.header("📊 분석 설정")
         cols = df.columns.tolist()
         
-        # [개선] 데이터 열 초기값 스마트 선택 (No. 제외)
         g_col = st.sidebar.selectbox("그룹 열", cols, index=cols.index('Group') if 'Group' in cols else 0)
         d_col = st.sidebar.selectbox("날짜 열", cols, index=cols.index('Day') if 'Day' in cols else 0)
         
-        # 분석 대상 후보: 숫자형이면서 No, Day가 아닌 열 우선 탐색
+        # [개선 유지] 데이터 열 초기값 스마트 선택 (No. 제외)
         candidate_cols = [c for c in cols if c not in [g_col, d_col, 'No.', 'no', 'No']]
         default_w_idx = 0
         for i, c in enumerate(candidate_cols):
@@ -83,16 +82,19 @@ with tabs[0]:
         target_sel = st.sidebar.selectbox("통계 기준일", stat_options, index=len(stat_options)-1)
         ctrl_g = st.sidebar.selectbox("대조군(Control)", sorted(df[g_col].unique()), index=0)
 
-        # --- 트렌드 그래프 (x축 실제 측정일 반영) ---
+        # --- 트렌드 그래프 (x축 실제 측정일 고정) ---
         color_map = {"G1": "#000000", "G2": "#1f77b4", "G3": "#ff7f0e", "G4": "#d62728", "G5": "#2ca02c"}
         graph_df = df[(df[d_col] >= day_range[0]) & (df[d_col] <= day_range[1])].dropna(subset=[w_col])
         df_s = graph_df.groupby([g_col, d_col])[w_col].agg(['mean', 'sem']).reset_index()
         
+        # 실제 데이터가 있는 날짜만 추출
+        actual_measured_days = sorted(df_s[d_col].unique())
+
         fig = go.Figure()
         for g in sorted(df[g_col].unique()):
             data = df_s[df_s[g_col] == g]
             fig.add_trace(go.Scatter(
-                x=data[d_col], # 실제 날짜 값 사용
+                x=data[d_col], 
                 y=data['mean'], 
                 name=g, 
                 mode='lines+markers',
@@ -100,17 +102,26 @@ with tabs[0]:
                 error_y=dict(type='data', array=data['sem'], visible=True)
             ))
         
-        # [개선] x축을 카테고리가 아닌 선형/실제 숫자축으로 설정
+        # [개선] x축에 실제 측정일만 표시되도록 설정
         fig.update_layout(
-            xaxis=dict(title="Day (Actual Measured Days)", tickmode='linear', dtick=None),
+            xaxis=dict(
+                title="Day (Measured Days Only)",
+                tickmode='array',
+                tickvals=actual_measured_days,  # 실제 데이터가 있는 날짜만 눈금으로 설정
+                ticktext=[f"{d}" for d in actual_measured_days]
+            ),
             yaxis_title=w_col, 
-            plot_bgcolor='white'
+            plot_bgcolor='white',
+            hovermode='x unified'
         )
         st.plotly_chart(fig, use_container_width=True)
 
         # --- 통계 분석 ---
         st.divider()
-        st.subheader(f"🧬 상세 통계 결과 ({target_sel})")
+        # [개선] 기준일 옆 '일' 표시 추가
+        display_day = f"{target_sel}일" if target_sel != "전체 기간(All Days)" else target_sel
+        st.subheader(f"🧬 상세 통계 결과 ({display_day})")
+        
         a_df = df.dropna(subset=[w_col]) if target_sel == "전체 기간(All Days)" else df[df[d_col] == int(target_sel)].dropna(subset=[w_col])
         summary = a_df.groupby(g_col)[w_col].agg(['count', 'mean', 'sem']).reset_index()
         
@@ -174,9 +185,4 @@ if user_info["role"] == "admin":
         if st.button("서버 저장"):
             if up_file:
                 with open(os.path.join(DATA_DIR, up_file.name), "wb") as f: f.write(up_file.getbuffer())
-                st.success("저장 완료!"); st.rerun()
-
-st.sidebar.divider()
-if st.sidebar.button("Log Out"):
-    st.session_state.logged_in = False
-    st.rerun()
+                st.success("저장 완료!"); st.rer

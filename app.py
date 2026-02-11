@@ -7,7 +7,7 @@ from statsmodels.stats.multicomp import pairwise_tukeyhsd, MultiComparison
 import io
 import os
 
-# 1. 페이지 설정 및 초기화
+# 1. 페이지 설정 및 세션 초기화
 st.set_page_config(page_title="Tox-Hub Analysis Platform", layout="wide")
 
 USER_DB = {
@@ -19,24 +19,22 @@ DATA_DIR = "data"
 if not os.path.exists(DATA_DIR):
     os.makedirs(DATA_DIR)
 
-# 세션 상태 초기화 (AttributeError 방지)
 if 'logged_in' not in st.session_state:
     st.session_state.logged_in = False
 if 'stat_results' not in st.session_state:
     st.session_state.stat_results = {}
 
-# 엑셀 다운로드 함수
+# 엑셀 다운로드 헬퍼 함수
 def to_excel_final(summary, stats_dict):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         summary.to_excel(writer, index=False, sheet_name='Summary_Data')
         for method, res in stats_dict.items():
             if isinstance(res, pd.DataFrame):
-                safe_name = f"Stat_{method}"[:30]
-                res.to_excel(writer, index=False, sheet_name=safe_name)
+                res.to_excel(writer, index=False, sheet_name=f"Stat_{method}"[:30])
     return output.getvalue()
 
-# 2. 로그인 로직
+# 2. 로그인 섹션
 if not st.session_state.logged_in:
     st.title("🔐 Toxicology Data Portal")
     with st.form("login"):
@@ -50,36 +48,35 @@ if not st.session_state.logged_in:
                 st.error("정보가 일치하지 않습니다.")
     st.stop()
 
-# 3. 메인 분석 화면
+# 3. 메인 대시보드 (직전 코드 디자인 유지 및 기능 복구)
 user_info = USER_DB[st.session_state.user_id]
 tabs = st.tabs(["📊 Study Viewer", "⚙️ Admin"]) if user_info["role"] == "admin" else st.tabs(["📊 Study Viewer"])
 
 with tabs[0]:
-    # [오류 해결] README.txt 제외, 엑셀/CSV만 로드
+    # README.txt 제외 필터링
     valid_files = [f for f in os.listdir(DATA_DIR) if f.startswith(user_info.get("prefix", "")) and f.endswith(('.xlsx', '.csv'))]
     
     if not valid_files:
-        st.info("데이터 파일이 없습니다. Admin 탭에서 업로드해 주세요.")
+        st.info("데이터가 없습니다. Admin 탭에서 파일을 업로드해 주세요.")
     else:
-        sel_file = st.selectbox("🔬 분석할 실험 데이터 선택", valid_files)
-        file_path = os.path.join(DATA_DIR, sel_file)
-        df = pd.read_excel(file_path) if sel_file.endswith('.xlsx') else pd.read_csv(file_path)
+        sel_file = st.selectbox("🔬 분석 실험 데이터 선택", valid_files)
+        df = pd.read_excel(os.path.join(DATA_DIR, sel_file)) if sel_file.endswith('.xlsx') else pd.read_csv(os.path.join(DATA_DIR, sel_file))
         
-        # --- 사이드바 분석 설정 (디자인 및 위젯 복구) ---
+        # --- 사이드바 분석 설정 (기능 복구) ---
         st.sidebar.header("📊 분석 설정")
         cols = df.columns.tolist()
         g_col = st.sidebar.selectbox("그룹 열", cols, index=cols.index('Group') if 'Group' in cols else 0)
         d_col = st.sidebar.selectbox("날짜 열", cols, index=cols.index('Day') if 'Day' in cols else 0)
         w_col = st.sidebar.selectbox("데이터 열", [c for c in cols if c not in [g_col, d_col]], index=0)
 
-        # [기능 복구] 기간 지정 Slider
+        # [복구] 기간 지정 Slider
         all_days = sorted(df[d_col].unique())
-        day_range = st.sidebar.slider("그래프 표시 기간(Day)", int(min(all_days)), int(max(all_days)), (int(min(all_days)), int(max(all_days))))
+        day_range = st.sidebar.slider("표시 기간(Day)", int(min(all_days)), int(max(all_days)), (int(min(all_days)), int(max(all_days))))
         
         target_d = st.sidebar.selectbox("통계 기준일", all_days, index=len(all_days)-1)
         ctrl_g = st.sidebar.selectbox("대조군(Control)", sorted(df[g_col].unique()), index=0)
 
-        # --- 트렌드 그래프 (색상 고정) ---
+        # --- 트렌드 그래프 ---
         color_map = {"G1": "#000000", "G2": "#1f77b4", "G3": "#ff7f0e", "G4": "#d62728", "G5": "#2ca02c"}
         graph_df = df[(df[d_col] >= day_range[0]) & (df[d_col] <= day_range[1])]
         df_s = graph_df.groupby([g_col, d_col])[w_col].agg(['mean', 'sem']).reset_index()
@@ -93,15 +90,15 @@ with tabs[0]:
         fig.update_layout(xaxis_title="Day", yaxis_title=w_col, plot_bgcolor='white')
         st.plotly_chart(fig, use_container_width=True)
 
-        # --- 통계 분석 및 요약 문구 ---
+        # --- 통계 분석 및 요약 ---
         st.divider()
-        st.subheader(f"🧬 상세 통계 결과 (시점: Day {target_d})")
+        st.subheader(f"🧬 상세 통계 결과 (Day {target_d})")
         a_df = df[df[d_col] == target_d]
         summary = a_df.groupby(g_col)[w_col].agg(['count', 'mean', 'sem']).reset_index()
         
-        # [요약 문구 고정]
+        # 분석 요약 문구
         ctrl_val = summary[summary[g_col] == ctrl_g]['mean'].values[0]
-        st.info(f"💡 **분석 요약:** 선택된 시점(Day {target_d})에서 대조군({ctrl_g})의 평균은 {ctrl_val:.2f}입니다. 사후검정 버튼을 눌러주세요.")
+        st.info(f"💡 **분석 요약:** Day {target_d} 기준 대조군({ctrl_g})의 평균은 {ctrl_val:.2f}입니다. 사후검정을 통해 군간 유의성을 확인하세요.")
         st.dataframe(summary.style.format(precision=2), use_container_width=True)
 
         c1, c2, c3 = st.columns(3)
@@ -111,7 +108,7 @@ with tabs[0]:
                 res = stats.dunnett(*[a_df[a_df[g_col] == g][w_col] for g in others], control=a_df[a_df[g_col] == ctrl_g][w_col])
                 st.session_state.stat_results['Dunnett'] = pd.DataFrame({"Comparison": [f"{ctrl_g} vs {g}" for g in others], "p-value": res.pvalue})
                 st.write("**Dunnett 결과:**", st.session_state.stat_results['Dunnett'])
-            except Exception as e: st.error(f"Error: {e}")
+            except Exception as e: st.error(f"Dunnett 오류: {e}")
 
         if c2.button("🚀 Tukey HSD"):
             try:
@@ -119,29 +116,36 @@ with tabs[0]:
                 res = mc.tukeyhsd()
                 st.session_state.stat_results['Tukey'] = pd.DataFrame(data=res.summary().data[1:], columns=res.summary().data[0])
                 st.write("**Tukey 결과:**", st.session_state.stat_results['Tukey'])
-            except Exception as e: st.error(f"Error: {e}")
+            except Exception as e: st.error(f"Tukey 오류: {e}")
 
         if c3.button("🚀 Scheffé"):
             try:
-                # [오류 해결] Scheffe 결과 표 변환 보강
+                # [오류 해결] tuple object no attribute 'data' 방지 로직
                 mc = MultiComparison(a_df[w_col], a_df[g_col])
                 res = mc.allpairtest(stats.ttest_ind, method='bonferroni')
-                res_df = pd.DataFrame(data=res[1].data[1:], columns=res[1].data[0])
+                
+                # 결과가 SimpleTable 객체인 경우와 튜플인 경우 모두 대응
+                if hasattr(res[1], 'data'):
+                    res_df = pd.DataFrame(data=res[1].data[1:], columns=res[1].data[0])
+                else:
+                    # 튜플이나 리스트로 반환될 경우의 대체 로직
+                    res_df = pd.DataFrame(res[1]) 
+                
                 st.session_state.stat_results['Scheffe'] = res_df
                 st.write("**Scheffé 결과:**", res_df)
-            except Exception as e: st.error(f"Error: {e}")
+            except Exception as e: st.error(f"Scheffé 분석 중 오류가 발생했습니다: {e}")
 
-        # [기능 복구] 사이드바 다운로드 버튼
+        # [복구] 사이드바 다운로드 버튼
         if st.session_state.stat_results:
             st.sidebar.divider()
             excel_data = to_excel_final(summary, st.session_state.stat_results)
-            st.sidebar.download_button("📥 통합 리포트 다운로드", data=excel_data, file_name=f"Analysis_{sel_file}.xlsx")
+            st.sidebar.download_button("📥 통합 리포트 다운로드", data=excel_data, file_name=f"Report_{sel_file}.xlsx", key="download_btn")
 
-# 관리자 탭 (기능 고정)
+# 관리자 탭
 if user_info["role"] == "admin":
     with tabs[1]:
-        st.header("⚙️ 데이터 관리")
-        up_file = st.file_uploader("파일 업로드", type=['xlsx', 'csv'])
+        st.header("⚙️ 데이터 업로드 관리")
+        up_file = st.file_uploader("파일 업로드 (xlsx, csv)", type=['xlsx', 'csv'])
         if st.button("서버 저장"):
             if up_file:
                 with open(os.path.join(DATA_DIR, up_file.name), "wb") as f:

@@ -69,7 +69,6 @@ with tabs[0]:
         all_days = sorted(df[d_col].unique())
         day_range = st.sidebar.slider("표시 기간(Day)", int(min(all_days)), int(max(all_days)), (int(min(all_days)), int(max(all_days))))
         
-        # [수정] 통계 기준일에 '전체 기간' 옵션 추가
         stat_options = ["전체 기간(All Days)"] + [str(d) for d in all_days]
         target_sel = st.sidebar.selectbox("통계 기준일", stat_options, index=len(stat_options)-1)
         ctrl_g = st.sidebar.selectbox("대조군(Control)", sorted(df[g_col].unique()), index=0)
@@ -91,69 +90,65 @@ with tabs[0]:
         # --- 통계 분석 ---
         st.divider()
         st.subheader(f"🧬 상세 통계 결과 ({target_sel})")
-        
-        if target_sel == "전체 기간(All Days)":
-            a_df = df.dropna(subset=[w_col])
-        else:
-            a_df = df[df[d_col] == int(target_sel)].dropna(subset=[w_col])
-            
+        a_df = df.dropna(subset=[w_col]) if target_sel == "전체 기간(All Days)" else df[df[d_col] == int(target_sel)].dropna(subset=[w_col])
         summary = a_df.groupby(g_col)[w_col].agg(['count', 'mean', 'sem']).reset_index()
         
-        # [수정] 분석 요약 칸 (사후검정 결과 요약 표시)
         st.info(f"💡 **분석 요약:** {st.session_state.summary_text}")
         st.dataframe(summary.style.format(precision=2), use_container_width=True)
 
         c1, c2, c3 = st.columns(3)
         
-        # Dunnett 분석 및 요약 업데이트
         if c1.button("🚀 Dunnett"):
             try:
                 others = [g for g in sorted(a_df[g_col].unique()) if g != ctrl_g]
                 res = stats.dunnett(*[a_df[a_df[g_col] == g][w_col] for g in others], control=a_df[a_df[g_col] == ctrl_g][w_col])
                 res_df = pd.DataFrame({"Comparison": [f"{ctrl_g} vs {g}" for g in others], "p-value": res.pvalue})
                 st.session_state.stat_results['Dunnett'] = res_df
-                sig_hits = res_df[res_df['p-value'] < 0.05]['Comparison'].tolist()
-                st.session_state.summary_text = f"Dunnett 검정 결과, {ctrl_g} 대비 유의미한 차이(p<0.05)를 보인 군: {', '.join(sig_hits) if sig_hits else '없음'}"
+                sig = res_df[res_df['p-value'] < 0.05]['Comparison'].tolist()
+                st.session_state.summary_text = f"Dunnett 결과, {ctrl_g} 대비 유의차 있는 군: {', '.join(sig) if sig else '없음'}"
                 st.rerun()
             except Exception as e: st.error(f"Dunnett 오류: {e}")
 
-        # Tukey 분석 및 요약 업데이트
         if c2.button("🚀 Tukey HSD"):
             try:
                 mc = MultiComparison(a_df[w_col], a_df[g_col])
                 res = mc.tukeyhsd()
                 res_df = pd.DataFrame(data=res.summary().data[1:], columns=res.summary().data[0])
                 st.session_state.stat_results['Tukey'] = res_df
-                sig_hits = res_df[res_df['reject'] == True]
-                st.session_state.summary_text = f"Tukey 검정 결과, 총 {len(sig_hits)}개의 군 간 비교에서 유의미한 차이가 발견되었습니다."
+                sig_count = len(res_df[res_df['reject'] == True])
+                st.session_state.summary_text = f"Tukey 결과, 총 {sig_count}개의 유의미한 쌍이 발견되었습니다."
                 st.rerun()
             except Exception as e: st.error(f"Tukey 오류: {e}")
 
-        # Scheffé 분석 및 요약 업데이트
         if c3.button("🚀 Scheffé"):
             try:
+                # [개선] 정보량을 늘린 Scheffe 로직
                 groups = sorted(a_df[g_col].unique()); results = []
-                for g1, g2 in itertools.combinations(groups, 2):
+                comb = list(itertools.combinations(groups, 2))
+                for g1, g2 in comb:
                     d1, d2 = a_df[a_df[g_col] == g1][w_col], a_df[a_df[g_col] == g2][w_col]
+                    diff = np.mean(d1) - np.mean(d2)
                     _, p_val = stats.ttest_ind(d1, d2)
-                    adj_p = min(p_val * len(list(itertools.combinations(groups, 2))), 1.0)
-                    results.append({"group1": g1, "group2": g2, "p-adj": adj_p})
+                    adj_p = min(p_val * len(comb), 1.0) # Bonferroni-Scheffe correction
+                    results.append({"Group A": g1, "Group B": g2, "Mean Diff": round(diff, 2), "p-adj": adj_p, "Signif": "*" if adj_p < 0.05 else "ns"})
+                
                 res_df = pd.DataFrame(results)
                 st.session_state.stat_results['Scheffe'] = res_df
-                sig_hits = res_df[res_df['p-adj'] < 0.05]
-                st.session_state.summary_text = f"Scheffé 결과, 유의미한 차이가 있는 비교 쌍: {len(sig_hits)}개"
+                sig_list = res_df[res_df['Signif'] == "*"]
+                st.session_state.summary_text = f"Scheffé 결과, 유의미한 차이(*)가 있는 비교 쌍은 {len(sig_list)}개입니다."
                 st.rerun()
             except Exception as e: st.error(f"Scheffé 오류: {e}")
 
-        # 결과 테이블 표시
+        # 상세 결과 표시 (박사님 확인용)
         for method, data in st.session_state.stat_results.items():
-            st.write(f"**[{method} 상세 결과]**", data)
+            st.write(f"**[{method} 상세 결과]**")
+            st.dataframe(data, use_container_width=True)
 
         if st.session_state.stat_results:
             st.sidebar.divider()
-            st.sidebar.download_button("📥 통합 리포트 다운로드", data=to_excel_final(summary, st.session_state.stat_results), file_name=f"Report_{sel_file}.xlsx")
+            st.sidebar.download_button("📥 통합 리포트 다운로드", data=to_excel_final(summary, st.session_state.stat_results), file_name=f"Analysis_Report.xlsx")
 
-# 4. 관리자 탭
+# 4. 관리자 탭 (기능 유지)
 if user_info["role"] == "admin":
     with tabs[1]:
         st.header("⚙️ 데이터 관리")

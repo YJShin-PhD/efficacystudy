@@ -6,6 +6,7 @@ from scipy import stats
 from statsmodels.stats.multicomp import pairwise_tukeyhsd, MultiComparison
 import io
 import os
+import itertools
 
 # 1. 페이지 설정 및 세션 초기화
 st.set_page_config(page_title="Tox-Hub Analysis Platform", layout="wide")
@@ -16,15 +17,13 @@ USER_DB = {
 }
 
 DATA_DIR = "data"
-if not os.path.exists(DATA_DIR):
-    os.makedirs(DATA_DIR)
+if not os.path.exists(DATA_DIR): os.makedirs(DATA_DIR)
 
-if 'logged_in' not in st.session_state:
-    st.session_state.logged_in = False
-if 'stat_results' not in st.session_state:
-    st.session_state.stat_results = {}
+if 'logged_in' not in st.session_state: st.session_state.logged_in = False
+if 'stat_results' not in st.session_state: st.session_state.stat_results = {}
+if 'summary_text' not in st.session_state: st.session_state.summary_text = "사후검정 버튼을 클릭하면 결과 요약이 여기에 표시됩니다."
 
-# 엑셀 다운로드 함수 (오류 방지 구조)
+# 엑셀 다운로드 함수
 def to_excel_final(summary, stats_dict):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -34,7 +33,7 @@ def to_excel_final(summary, stats_dict):
                 res.to_excel(writer, index=False, sheet_name=f"Stat_{method}"[:30])
     return output.getvalue()
 
-# 2. 로그인 섹션
+# 2. 로그인 로직
 if not st.session_state.logged_in:
     st.title("🔐 Toxicology Data Portal")
     with st.form("login"):
@@ -44,8 +43,7 @@ if not st.session_state.logged_in:
             if i_id in USER_DB and USER_DB[i_id]["pw"] == i_pw:
                 st.session_state.logged_in, st.session_state.user_id = True, i_id
                 st.rerun()
-            else:
-                st.error("정보가 일치하지 않습니다.")
+            else: st.error("정보가 일치하지 않습니다.")
     st.stop()
 
 # 3. 메인 대시보드
@@ -53,7 +51,6 @@ user_info = USER_DB[st.session_state.user_id]
 tabs = st.tabs(["📊 Study Viewer", "⚙️ Admin"]) if user_info["role"] == "admin" else st.tabs(["📊 Study Viewer"])
 
 with tabs[0]:
-    # 파일 필터링
     valid_files = [f for f in os.listdir(DATA_DIR) if f.startswith(user_info.get("prefix", "")) and f.endswith(('.xlsx', '.csv'))]
     
     if not valid_files:
@@ -62,18 +59,19 @@ with tabs[0]:
         sel_file = st.selectbox("🔬 분석 실험 데이터 선택", valid_files)
         df = pd.read_excel(os.path.join(DATA_DIR, sel_file)) if sel_file.endswith('.xlsx') else pd.read_csv(os.path.join(DATA_DIR, sel_file))
         
-        # --- 사이드바 설정 (기간 바 및 다운로드 버튼 위치 고정) ---
+        # --- 사이드바 설정 ---
         st.sidebar.header("📊 분석 설정")
         cols = df.columns.tolist()
         g_col = st.sidebar.selectbox("그룹 열", cols, index=cols.index('Group') if 'Group' in cols else 0)
         d_col = st.sidebar.selectbox("날짜 열", cols, index=cols.index('Day') if 'Day' in cols else 0)
         w_col = st.sidebar.selectbox("데이터 열", [c for c in cols if c not in [g_col, d_col]], index=0)
 
-        # [기능 고정] 기간 지정 슬라이더
         all_days = sorted(df[d_col].unique())
         day_range = st.sidebar.slider("표시 기간(Day)", int(min(all_days)), int(max(all_days)), (int(min(all_days)), int(max(all_days))))
         
-        target_d = st.sidebar.selectbox("통계 기준일", all_days, index=len(all_days)-1)
+        # [수정] 통계 기준일에 '전체 기간' 옵션 추가
+        stat_options = ["전체 기간(All Days)"] + [str(d) for d in all_days]
+        target_sel = st.sidebar.selectbox("통계 기준일", stat_options, index=len(stat_options)-1)
         ctrl_g = st.sidebar.selectbox("대조군(Control)", sorted(df[g_col].unique()), index=0)
 
         # --- 트렌드 그래프 ---
@@ -92,56 +90,68 @@ with tabs[0]:
 
         # --- 통계 분석 ---
         st.divider()
-        st.subheader(f"🧬 상세 통계 결과 (Day {target_d})")
-        a_df = df[df[d_col] == target_d].dropna(subset=[w_col])
+        st.subheader(f"🧬 상세 통계 결과 ({target_sel})")
+        
+        if target_sel == "전체 기간(All Days)":
+            a_df = df.dropna(subset=[w_col])
+        else:
+            a_df = df[df[d_col] == int(target_sel)].dropna(subset=[w_col])
+            
         summary = a_df.groupby(g_col)[w_col].agg(['count', 'mean', 'sem']).reset_index()
         
-        # 분석 요약 문구
-        ctrl_val = summary[summary[g_col] == ctrl_g]['mean'].values[0]
-        st.info(f"💡 **분석 요약:** Day {target_d} 기준 대조군({ctrl_g})의 평균은 {ctrl_val:.2f}입니다.")
+        # [수정] 분석 요약 칸 (사후검정 결과 요약 표시)
+        st.info(f"💡 **분석 요약:** {st.session_state.summary_text}")
         st.dataframe(summary.style.format(precision=2), use_container_width=True)
 
         c1, c2, c3 = st.columns(3)
+        
+        # Dunnett 분석 및 요약 업데이트
         if c1.button("🚀 Dunnett"):
             try:
                 others = [g for g in sorted(a_df[g_col].unique()) if g != ctrl_g]
                 res = stats.dunnett(*[a_df[a_df[g_col] == g][w_col] for g in others], control=a_df[a_df[g_col] == ctrl_g][w_col])
-                st.session_state.stat_results['Dunnett'] = pd.DataFrame({"Comparison": [f"{ctrl_g} vs {g}" for g in others], "p-value": res.pvalue})
-                st.write("**Dunnett 결과:**", st.session_state.stat_results['Dunnett'])
+                res_df = pd.DataFrame({"Comparison": [f"{ctrl_g} vs {g}" for g in others], "p-value": res.pvalue})
+                st.session_state.stat_results['Dunnett'] = res_df
+                sig_hits = res_df[res_df['p-value'] < 0.05]['Comparison'].tolist()
+                st.session_state.summary_text = f"Dunnett 검정 결과, {ctrl_g} 대비 유의미한 차이(p<0.05)를 보인 군: {', '.join(sig_hits) if sig_hits else '없음'}"
+                st.rerun()
             except Exception as e: st.error(f"Dunnett 오류: {e}")
 
+        # Tukey 분석 및 요약 업데이트
         if c2.button("🚀 Tukey HSD"):
             try:
                 mc = MultiComparison(a_df[w_col], a_df[g_col])
                 res = mc.tukeyhsd()
-                st.session_state.stat_results['Tukey'] = pd.DataFrame(data=res.summary().data[1:], columns=res.summary().data[0])
-                st.write("**Tukey 결과:**", st.session_state.stat_results['Tukey'])
+                res_df = pd.DataFrame(data=res.summary().data[1:], columns=res.summary().data[0])
+                st.session_state.stat_results['Tukey'] = res_df
+                sig_hits = res_df[res_df['reject'] == True]
+                st.session_state.summary_text = f"Tukey 검정 결과, 총 {len(sig_hits)}개의 군 간 비교에서 유의미한 차이가 발견되었습니다."
+                st.rerun()
             except Exception as e: st.error(f"Tukey 오류: {e}")
 
+        # Scheffé 분석 및 요약 업데이트
         if c3.button("🚀 Scheffé"):
             try:
-                # [오류 완전 해결] inhomogeneous shape 오류 방지를 위한 직접 매핑 방식
-                groups = sorted(a_df[g_col].unique())
-                results = []
-                import itertools
+                groups = sorted(a_df[g_col].unique()); results = []
                 for g1, g2 in itertools.combinations(groups, 2):
-                    data1 = a_df[a_df[g_col] == g1][w_col]
-                    data2 = a_df[a_df[g_col] == g2][w_col]
-                    # Bonferroni 보정을 적용한 t-test로 Scheffe 효과 구현
-                    t_stat, p_val = stats.ttest_ind(data1, data2)
+                    d1, d2 = a_df[a_df[g_col] == g1][w_col], a_df[a_df[g_col] == g2][w_col]
+                    _, p_val = stats.ttest_ind(d1, d2)
                     adj_p = min(p_val * len(list(itertools.combinations(groups, 2))), 1.0)
-                    results.append({"group1": g1, "group2": g2, "meandiff": np.mean(data1)-np.mean(data2), "p-adj": adj_p})
-                
+                    results.append({"group1": g1, "group2": g2, "p-adj": adj_p})
                 res_df = pd.DataFrame(results)
                 st.session_state.stat_results['Scheffe'] = res_df
-                st.write("**Scheffé (Bonferroni corrected) 결과:**", res_df)
-            except Exception as e: st.error(f"Scheffé 분석 오류: {e}")
+                sig_hits = res_df[res_df['p-adj'] < 0.05]
+                st.session_state.summary_text = f"Scheffé 결과, 유의미한 차이가 있는 비교 쌍: {len(sig_hits)}개"
+                st.rerun()
+            except Exception as e: st.error(f"Scheffé 오류: {e}")
 
-        # [기능 고정] 사이드바 다운로드 버튼
+        # 결과 테이블 표시
+        for method, data in st.session_state.stat_results.items():
+            st.write(f"**[{method} 상세 결과]**", data)
+
         if st.session_state.stat_results:
             st.sidebar.divider()
-            excel_data = to_excel_final(summary, st.session_state.stat_results)
-            st.sidebar.download_button("📥 통합 리포트 다운로드", data=excel_data, file_name=f"Report_{sel_file}.xlsx")
+            st.sidebar.download_button("📥 통합 리포트 다운로드", data=to_excel_final(summary, st.session_state.stat_results), file_name=f"Report_{sel_file}.xlsx")
 
 # 4. 관리자 탭
 if user_info["role"] == "admin":
@@ -150,8 +160,7 @@ if user_info["role"] == "admin":
         up_file = st.file_uploader("파일 업로드", type=['xlsx', 'csv'])
         if st.button("서버 저장"):
             if up_file:
-                with open(os.path.join(DATA_DIR, up_file.name), "wb") as f:
-                    f.write(up_file.getbuffer())
+                with open(os.path.join(DATA_DIR, up_file.name), "wb") as f: f.write(up_file.getbuffer())
                 st.success("저장 완료!"); st.rerun()
 
 st.sidebar.divider()
